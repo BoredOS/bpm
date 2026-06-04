@@ -1,0 +1,7 @@
+version = "1"
+
+[[repositories]]
+name = "bur"
+url = "https://bur.boredos.dev/index.toml"
+priority = 1
+enabled = true
