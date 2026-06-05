@@ -373,7 +373,7 @@ static int collect_files(const char *srcdir, const char *destdir,
 }
 
 // Copy files from srcdir to destdir
-static void copy_dir(const char *srcdir, const char *destdir) {
+static void copy_dir(const char *srcdir, const char *destdir, int skip_existing) {
     ensure_dir(destdir);
     FAT32_FileInfo entries[128];
     int count = sys_list(srcdir, entries, 128);
@@ -385,6 +385,10 @@ static void copy_dir(const char *srcdir, const char *destdir) {
         char destpath[1024];
         snprintf(srcpath, sizeof(srcpath), "%s/%s", srcdir, entries[i].name);
         snprintf(destpath, sizeof(destpath), "%s/%s", destdir, entries[i].name);
+        if (skip_existing) {
+            struct stat st;
+            if (stat(destpath, &st) == 0) continue;
+        }
         copy_file(srcpath, destpath);
     }
 }
@@ -418,7 +422,7 @@ int cmd_update(void) {
     return 0;
 }
 
-int cmd_install(const char *pkgname) {
+int cmd_install(const char *pkgname, int keep_configs) {
     PkgInfo pkg;
     char bup_path[1024] = {0};
     int is_local = 0;
@@ -510,7 +514,7 @@ int cmd_install(const char *pkgname) {
     if (stat(bin_src, &st) == 0) {
         const char *dest = m.install_bin[0] ? m.install_bin : "/usr/bin";
         ensure_dir(dest);
-        copy_dir(bin_src, dest);
+        copy_dir(bin_src, dest, 0);
         nfiles += collect_files(bin_src, dest, &files[nfiles], 256 - nfiles);
     }
 
@@ -519,7 +523,7 @@ int cmd_install(const char *pkgname) {
     snprintf(assets_src, sizeof(assets_src), "%s/assets", extract_dir);
     if (stat(assets_src, &st) == 0 && m.install_assets[0]) {
         ensure_dir(m.install_assets);
-        copy_dir(assets_src, m.install_assets);
+        copy_dir(assets_src, m.install_assets, 0);
         nfiles += collect_files(assets_src, m.install_assets, &files[nfiles], 256 - nfiles);
     }
 
@@ -529,7 +533,7 @@ int cmd_install(const char *pkgname) {
     if (stat(config_src, &st) == 0) {
         const char *dest = m.install_config[0] ? m.install_config : "/Library/conf";
         ensure_dir(dest);
-        copy_dir(config_src, dest);
+        copy_dir(config_src, dest, keep_configs);
         nfiles += collect_files(config_src, dest, &files[nfiles], 256 - nfiles);
     }
     printf("done\n");
@@ -598,7 +602,7 @@ int cmd_install(const char *pkgname) {
     return 0;
 }
 
-int cmd_remove(const char *pkgname) {
+int cmd_remove(const char *pkgname, int keep_configs) {
     // Read files list from installed.toml
     FILE *f = fopen(INSTALLED_TOML, "r");
     if (!f) { fprintf(stderr, "Nothing installed (no %s)\n", INSTALLED_TOML); return 1; }
@@ -608,6 +612,12 @@ int cmd_remove(const char *pkgname) {
     char pkg_hdr[512];
     snprintf(pkg_hdr, sizeof(pkg_hdr), "[package.%s]", pkgname);
     int found = 0;
+
+    Manifest m;
+    char manifest_path[1024];
+    snprintf(manifest_path, sizeof(manifest_path), "%s/%s/MANIFEST.toml", PACKAGES_DIR, pkgname);
+    int has_manifest = (parse_manifest(manifest_path, &m) == 0);
+    const char *config_dir = (has_manifest && m.install_config[0]) ? m.install_config : "/Library/conf";
 
     // Run remove.bsh first if it exists
     char script[1024];
@@ -635,7 +645,18 @@ int cmd_remove(const char *pkgname) {
         if (s[0] == '"') {
             char fpath[1024] = {0};
             extract_quoted(s, fpath, sizeof(fpath));
-            if (fpath[0]) sys_delete(fpath);
+            if (fpath[0]) {
+                int is_config = 0;
+                if (keep_configs) {
+                    size_t conf_len = strlen(config_dir);
+                    if (strncmp(fpath, config_dir, conf_len) == 0 && (fpath[conf_len] == '/' || fpath[conf_len] == '\0')) {
+                        is_config = 1;
+                    }
+                }
+                if (!is_config) {
+                    sys_delete(fpath);
+                }
+            }
         }
     }
     fclose(f);
@@ -689,34 +710,24 @@ int cmd_upgrade(const char *pkgname) {
     if (!f) { printf("No packages installed\n"); return 0; }
 
     char line[1024];
+    char pkgs[128][256];
+    char vers[128][128];
+    int count = 0;
+
     char cur_pkg[256] = {0};
     char cur_ver[128] = {0};
-    int upgraded = 0;
 
     while (fgets(line, sizeof(line), f)) {
         char *s = ltrim(line);
         rtrim_nl(s);
         if (s[0] == '[') {
-            // Process previous package if upgrading all
-            if (cur_pkg[0] && cur_ver[0] && (pkgname == NULL || strcmp(pkgname, cur_pkg) == 0)) {
-                PkgInfo pkg;
-                if (find_package(cur_pkg, &pkg) == 0 && strcmp(pkg.version, cur_ver) != 0) {
-                    printf("Upgrading %s %s → %s\n", cur_pkg, cur_ver, pkg.version);
-                    // Run postupdate from old package scripts if present
-                    char script[1024];
-                    snprintf(script, sizeof(script), "%s/%s/remove.bsh", PACKAGES_DIR, cur_pkg);
-                    struct stat st;
-                    if (stat(script, &st) == 0) {
-                        char cmd[1024];
-                        snprintf(cmd, sizeof(cmd), "bsh %s", script);
-                        bpm_system(cmd);
-                    }
-                    cmd_remove(cur_pkg);
-                    cmd_install(cur_pkg);
-                    upgraded++;
-                }
+            if (cur_pkg[0] && cur_ver[0] && count < 128) {
+                strncpy(pkgs[count], cur_pkg, sizeof(pkgs[count]) - 1);
+                pkgs[count][sizeof(pkgs[count]) - 1] = '\0';
+                strncpy(vers[count], cur_ver, sizeof(vers[count]) - 1);
+                vers[count][sizeof(vers[count]) - 1] = '\0';
+                count++;
             }
-            // Parse new package header
             if (strncmp(s, "[package.", 9) == 0) {
                 size_t l = strlen(s);
                 if (s[l-1] == ']') {
@@ -732,7 +743,36 @@ int cmd_upgrade(const char *pkgname) {
         if (strncmp(s, "version", 7) == 0)
             extract_quoted(s, cur_ver, sizeof(cur_ver));
     }
+    if (cur_pkg[0] && cur_ver[0] && count < 128) {
+        strncpy(pkgs[count], cur_pkg, sizeof(pkgs[count]) - 1);
+        pkgs[count][sizeof(pkgs[count]) - 1] = '\0';
+        strncpy(vers[count], cur_ver, sizeof(vers[count]) - 1);
+        vers[count][sizeof(vers[count]) - 1] = '\0';
+        count++;
+    }
     fclose(f);
+
+    int upgraded = 0;
+    for (int i = 0; i < count; i++) {
+        if (pkgname == NULL || strcmp(pkgname, pkgs[i]) == 0) {
+            PkgInfo pkg;
+            if (find_package(pkgs[i], &pkg) == 0 && strcmp(pkg.version, vers[i]) != 0) {
+                printf("Upgrading %s %s → %s\n", pkgs[i], vers[i], pkg.version);
+                // Run postupdate from old package scripts if present
+                char script[1024];
+                snprintf(script, sizeof(script), "%s/%s/remove.bsh", PACKAGES_DIR, pkgs[i]);
+                struct stat st;
+                if (stat(script, &st) == 0) {
+                    char cmd[1024];
+                    snprintf(cmd, sizeof(cmd), "bsh %s", script);
+                    bpm_system(cmd);
+                }
+                cmd_remove(pkgs[i], 1);
+                cmd_install(pkgs[i], 1);
+                upgraded++;
+            }
+        }
+    }
 
     if (upgraded == 0) printf("All packages up to date\n");
     return 0;
@@ -860,8 +900,8 @@ int cmd_info(const char *pkgname) {
 
 int cmd_reinstall(const char *pkgname) {
     printf("Reinstalling %s...\n", pkgname);
-    cmd_remove(pkgname);
-    return cmd_install(pkgname);
+    cmd_remove(pkgname, 0);
+    return cmd_install(pkgname, 0);
 }
 
 int cmd_clean(void) {
@@ -1050,8 +1090,8 @@ int main(int argc, char **argv) {
     if (argc < 2) return cmd_help();
 
     if (strcmp(argv[1], "update")     == 0) return cmd_update();
-    if (strcmp(argv[1], "install")    == 0) { if (argc < 3) { fprintf(stderr, "Usage: bpm install <pkg>\n"); return 1; } return cmd_install(argv[2]); }
-    if (strcmp(argv[1], "remove")     == 0) { if (argc < 3) { fprintf(stderr, "Usage: bpm remove <pkg>\n");  return 1; } return cmd_remove(argv[2]); }
+    if (strcmp(argv[1], "install")    == 0) { if (argc < 3) { fprintf(stderr, "Usage: bpm install <pkg>\n"); return 1; } return cmd_install(argv[2], 0); }
+    if (strcmp(argv[1], "remove")     == 0) { if (argc < 3) { fprintf(stderr, "Usage: bpm remove <pkg>\n");  return 1; } return cmd_remove(argv[2], 0); }
     if (strcmp(argv[1], "upgrade")    == 0) return cmd_upgrade(argc >= 3 ? argv[2] : NULL);
     if (strcmp(argv[1], "reinstall")  == 0) { if (argc < 3) { fprintf(stderr, "Usage: bpm reinstall <pkg>\n"); return 1; } return cmd_reinstall(argv[2]); }
     if (strcmp(argv[1], "list")       == 0) return cmd_list();
