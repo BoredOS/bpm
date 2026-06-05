@@ -13,6 +13,19 @@
 #define INSTALLED_TOML  "/var/lib/bpm/installed.toml"
 #define CONFIG_PATH     "/etc/bpm/bpmconf.toml"
 
+static const char *g_root = NULL;
+
+static const char *get_target_path(const char *path, char *buf, size_t buf_len) {
+    if (!g_root) return path;
+    size_t root_len = strlen(g_root);
+    if (root_len > 0 && g_root[root_len - 1] == '/' && path[0] == '/') {
+        snprintf(buf, buf_len, "%s%s", g_root, path + 1);
+    } else {
+        snprintf(buf, buf_len, "%s%s", g_root, path);
+    }
+    return buf;
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 static void ensure_dir(const char *path) {
@@ -339,9 +352,11 @@ static int parse_manifest(const char *manifest_path, Manifest *m) {
 // Append a file entry to installed.toml for a package
 static void record_installed(const char *pkgname, const char *version,
                                const char *repo, const char **files, int nfiles) {
-    ensure_dir(LIB_DIR);
-    FILE *f = fopen(INSTALLED_TOML, "a");
-    if (!f) { fprintf(stderr, "Cannot write to %s\n", INSTALLED_TOML); return; }
+    char lib_dir_buf[1024];
+    char inst_toml_buf[1024];
+    ensure_dir(get_target_path(LIB_DIR, lib_dir_buf, sizeof(lib_dir_buf)));
+    FILE *f = fopen(get_target_path(INSTALLED_TOML, inst_toml_buf, sizeof(inst_toml_buf)), "a");
+    if (!f) { fprintf(stderr, "Cannot write to %s\n", inst_toml_buf); return; }
     char ts[64];
     iso_timestamp(ts, sizeof(ts));
     fprintf(f, "[package.%s]\n", pkgname);
@@ -349,8 +364,17 @@ static void record_installed(const char *pkgname, const char *version,
     fprintf(f, "repo = \"%s\"\n", repo);
     fprintf(f, "installed_at = \"%s\"\n", ts);
     fprintf(f, "files = [\n");
-    for (int i = 0; i < nfiles; i++)
-        fprintf(f, "    \"%s\",\n", files[i]);
+    for (int i = 0; i < nfiles; i++) {
+        const char *fpath = files[i];
+        if (g_root) {
+            size_t rlen = strlen(g_root);
+            if (rlen > 0 && g_root[rlen-1] == '/') rlen--;
+            if (strncmp(fpath, g_root, rlen) == 0) {
+                fpath += rlen;
+            }
+        }
+        fprintf(f, "    \"%s\",\n", fpath);
+    }
     fprintf(f, "]\n\n");
     fclose(f);
 }
@@ -362,10 +386,19 @@ static int collect_files(const char *srcdir, const char *destdir,
     int count = 0;
     FAT32_FileInfo entries[128];
     int got = sys_list(srcdir, entries, 128);
+    if (got < 0) return 0;
     for (int i = 0; i < got && count < max_files; i++) {
-        if (!entries[i].is_directory) {
-            if (strncmp(entries[i].name, "._", 2) == 0) continue;
-            snprintf(files[count], 1024, "%s/%s", destdir, entries[i].name);
+        if (strncmp(entries[i].name, "._", 2) == 0) continue;
+        
+        char srcpath[1024];
+        char destpath[1024];
+        snprintf(srcpath, sizeof(srcpath), "%s/%s", srcdir, entries[i].name);
+        snprintf(destpath, sizeof(destpath), "%s/%s", destdir, entries[i].name);
+        
+        if (entries[i].is_directory) {
+            count += collect_files(srcpath, destpath, &files[count], max_files - count);
+        } else {
+            snprintf(files[count], 1024, "%s", destpath);
             count++;
         }
     }
@@ -377,19 +410,24 @@ static void copy_dir(const char *srcdir, const char *destdir, int skip_existing)
     ensure_dir(destdir);
     FAT32_FileInfo entries[128];
     int count = sys_list(srcdir, entries, 128);
+    if (count < 0) return;
     for (int i = 0; i < count; i++) {
-        if (entries[i].is_directory) continue;
         if (strncmp(entries[i].name, "._", 2) == 0) continue;
         
         char srcpath[1024];
         char destpath[1024];
         snprintf(srcpath, sizeof(srcpath), "%s/%s", srcdir, entries[i].name);
         snprintf(destpath, sizeof(destpath), "%s/%s", destdir, entries[i].name);
-        if (skip_existing) {
-            struct stat st;
-            if (stat(destpath, &st) == 0) continue;
+        
+        if (entries[i].is_directory) {
+            copy_dir(srcpath, destpath, skip_existing);
+        } else {
+            if (skip_existing) {
+                struct stat st;
+                if (stat(destpath, &st) == 0) continue;
+            }
+            copy_file(srcpath, destpath);
         }
-        copy_file(srcpath, destpath);
     }
 }
 
@@ -513,18 +551,22 @@ int cmd_install(const char *pkgname, int keep_configs) {
     struct stat st;
     if (stat(bin_src, &st) == 0) {
         const char *dest = m.install_bin[0] ? m.install_bin : "/usr/bin";
-        ensure_dir(dest);
-        copy_dir(bin_src, dest, 0);
-        nfiles += collect_files(bin_src, dest, &files[nfiles], 256 - nfiles);
+        char dest_buf[1024];
+        const char *target_dest = get_target_path(dest, dest_buf, sizeof(dest_buf));
+        ensure_dir(target_dest);
+        copy_dir(bin_src, target_dest, 0);
+        nfiles += collect_files(bin_src, target_dest, &files[nfiles], 256 - nfiles);
     }
 
     // assets/
     char assets_src[1024];
     snprintf(assets_src, sizeof(assets_src), "%s/assets", extract_dir);
     if (stat(assets_src, &st) == 0 && m.install_assets[0]) {
-        ensure_dir(m.install_assets);
-        copy_dir(assets_src, m.install_assets, 0);
-        nfiles += collect_files(assets_src, m.install_assets, &files[nfiles], 256 - nfiles);
+        char assets_buf[1024];
+        const char *target_assets = get_target_path(m.install_assets, assets_buf, sizeof(assets_buf));
+        ensure_dir(target_assets);
+        copy_dir(assets_src, target_assets, 0);
+        nfiles += collect_files(assets_src, target_assets, &files[nfiles], 256 - nfiles);
     }
 
     // config/
@@ -532,9 +574,11 @@ int cmd_install(const char *pkgname, int keep_configs) {
     snprintf(config_src, sizeof(config_src), "%s/config", extract_dir);
     if (stat(config_src, &st) == 0) {
         const char *dest = m.install_config[0] ? m.install_config : "/Library/conf";
-        ensure_dir(dest);
-        copy_dir(config_src, dest, keep_configs);
-        nfiles += collect_files(config_src, dest, &files[nfiles], 256 - nfiles);
+        char dest_buf[1024];
+        const char *target_dest = get_target_path(dest, dest_buf, sizeof(dest_buf));
+        ensure_dir(target_dest);
+        copy_dir(config_src, target_dest, keep_configs);
+        nfiles += collect_files(config_src, target_dest, &files[nfiles], 256 - nfiles);
     }
     printf("done\n");
 
@@ -544,11 +588,13 @@ int cmd_install(const char *pkgname, int keep_configs) {
 
     // Store scripts + MANIFEST in /var/lib/bpm/packages/<name>/
     char pkglib[1024];
+    char pkglib_buf[1024];
     snprintf(pkglib, sizeof(pkglib), "%s/%s", PACKAGES_DIR, final_name);
-    ensure_dir(pkglib);
+    const char *target_pkglib = get_target_path(pkglib, pkglib_buf, sizeof(pkglib_buf));
+    ensure_dir(target_pkglib);
     char sm[1024], dm[1024];
     snprintf(sm, sizeof(sm), "%s/MANIFEST.toml", extract_dir);
-    snprintf(dm, sizeof(dm), "%s/MANIFEST.toml", pkglib);
+    snprintf(dm, sizeof(dm), "%s/MANIFEST.toml", target_pkglib);
     copy_file(sm, dm);
 
     char scripts_src[1024];
@@ -563,7 +609,7 @@ int cmd_install(const char *pkgname, int keep_configs) {
                 if (nlen > 4 && strcmp(entries[i].name + nlen - 4, ".bsh") == 0) {
                     char src_bsh[1024], dest_bsh[1024];
                     snprintf(src_bsh, sizeof(src_bsh), "%s/%s", scripts_src, entries[i].name);
-                    snprintf(dest_bsh, sizeof(dest_bsh), "%s/%s", pkglib, entries[i].name);
+                    snprintf(dest_bsh, sizeof(dest_bsh), "%s/%s", target_pkglib, entries[i].name);
                     copy_file(src_bsh, dest_bsh);
                 }
             }
@@ -571,16 +617,16 @@ int cmd_install(const char *pkgname, int keep_configs) {
         
         // Check which scripts exist
         char spath[1024];
-        snprintf(spath, sizeof(spath), "%s/install.bsh", pkglib);
+        snprintf(spath, sizeof(spath), "%s/install.bsh", target_pkglib);
         m.has_install_script = (stat(spath, &st) == 0);
-        snprintf(spath, sizeof(spath), "%s/remove.bsh", pkglib);
+        snprintf(spath, sizeof(spath), "%s/remove.bsh", target_pkglib);
         m.has_remove_script = (stat(spath, &st) == 0);
     }
 
     // Run install.bsh if present
     if (m.has_install_script) {
         char script[1024];
-        snprintf(script, sizeof(script), "%s/install.bsh", pkglib);
+        snprintf(script, sizeof(script), "%s/install.bsh", target_pkglib);
         printf("Running install script... ");
         fflush(stdout);
         char cmd[1024];
@@ -1087,6 +1133,18 @@ int cmd_help(void) {
 // ─── Main ────────────────────────────────────────────────────────────────────
 
 int main(int argc, char **argv) {
+    int arg_offset = 0;
+    while (argc > 3 + arg_offset && (strcmp(argv[1 + arg_offset], "--root") == 0 || strcmp(argv[1 + arg_offset], "-r") == 0)) {
+        g_root = argv[2 + arg_offset];
+        arg_offset += 2;
+    }
+    if (arg_offset > 0) {
+        for (int i = 1; i < argc - arg_offset; i++) {
+            argv[i] = argv[i + arg_offset];
+        }
+        argc -= arg_offset;
+    }
+
     if (argc < 2) return cmd_help();
 
     if (strcmp(argv[1], "update")     == 0) return cmd_update();
