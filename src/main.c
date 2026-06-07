@@ -580,6 +580,18 @@ int cmd_install(const char *pkgname, int keep_configs) {
         copy_dir(config_src, target_dest, keep_configs);
         nfiles += collect_files(config_src, target_dest, &files[nfiles], 256 - nfiles);
     }
+
+    // usr/share/applications/ -> install desktop entries present in package
+    char apps_src[1024];
+    snprintf(apps_src, sizeof(apps_src), "%s/usr/share/applications", extract_dir);
+    if (stat(apps_src, &st) == 0) {
+        const char *dest_apps = "/usr/share/applications";
+        char apps_buf[1024];
+        const char *target_apps = get_target_path(dest_apps, apps_buf, sizeof(apps_buf));
+        ensure_dir(target_apps);
+        copy_dir(apps_src, target_apps, 0);
+        nfiles += collect_files(apps_src, target_apps, &files[nfiles], 256 - nfiles);
+    }
     printf("done\n");
 
     const char *final_name = is_local ? m.name : pkgname;
