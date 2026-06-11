@@ -93,17 +93,21 @@ static int copy_file(const char *src, const char *dest) {
 }
 
 static void remove_dir_recursive(const char *path) {
-    FAT32_FileInfo entries[128];
+    FAT32_FileInfo *entries = malloc(sizeof(FAT32_FileInfo) * 128);
+    if (!entries) return;
     int count = sys_list(path, entries, 128);
-    for (int i = 0; i < count; i++) {
-        char subpath[1024];
-        snprintf(subpath, sizeof(subpath), "%s/%s", path, entries[i].name);
-        if (entries[i].is_directory) {
-            remove_dir_recursive(subpath);
-        } else {
-            sys_delete(subpath);
+    if (count > 0) {
+        for (int i = 0; i < count; i++) {
+            char subpath[1024];
+            snprintf(subpath, sizeof(subpath), "%s/%s", path, entries[i].name);
+            if (entries[i].is_directory) {
+                remove_dir_recursive(subpath);
+            } else {
+                sys_delete(subpath);
+            }
         }
     }
+    free(entries);
     sys_delete(path);
 }
 
@@ -384,9 +388,13 @@ static void record_installed(const char *pkgname, const char *version,
 static int collect_files(const char *srcdir, const char *destdir,
                           char files[][1024], int max_files) {
     int count = 0;
-    FAT32_FileInfo entries[128];
+    FAT32_FileInfo *entries = malloc(sizeof(FAT32_FileInfo) * 128);
+    if (!entries) return 0;
     int got = sys_list(srcdir, entries, 128);
-    if (got < 0) return 0;
+    if (got < 0) {
+        free(entries);
+        return 0;
+    }
     for (int i = 0; i < got && count < max_files; i++) {
         if (strncmp(entries[i].name, "._", 2) == 0) continue;
         
@@ -402,15 +410,20 @@ static int collect_files(const char *srcdir, const char *destdir,
             count++;
         }
     }
+    free(entries);
     return count;
 }
 
 // Copy files from srcdir to destdir
 static void copy_dir(const char *srcdir, const char *destdir, int skip_existing) {
     ensure_dir(destdir);
-    FAT32_FileInfo entries[128];
+    FAT32_FileInfo *entries = malloc(sizeof(FAT32_FileInfo) * 128);
+    if (!entries) return;
     int count = sys_list(srcdir, entries, 128);
-    if (count < 0) return;
+    if (count < 0) {
+        free(entries);
+        return;
+    }
     for (int i = 0; i < count; i++) {
         if (strncmp(entries[i].name, "._", 2) == 0) continue;
         
@@ -429,6 +442,7 @@ static void copy_dir(const char *srcdir, const char *destdir, int skip_existing)
             copy_file(srcpath, destpath);
         }
     }
+    free(entries);
 }
 
 
@@ -612,19 +626,22 @@ int cmd_install(const char *pkgname, int keep_configs) {
     char scripts_src[1024];
     snprintf(scripts_src, sizeof(scripts_src), "%s/scripts", extract_dir);
     if (stat(scripts_src, &st) == 0) {
-        FAT32_FileInfo entries[128];
-        int s_count = sys_list(scripts_src, entries, 128);
-        for (int i = 0; i < s_count; i++) {
-            if (!entries[i].is_directory) {
-                if (strncmp(entries[i].name, "._", 2) == 0) continue;
-                size_t nlen = strlen(entries[i].name);
-                if (nlen > 4 && strcmp(entries[i].name + nlen - 4, ".bsh") == 0) {
-                    char src_bsh[1024], dest_bsh[1024];
-                    snprintf(src_bsh, sizeof(src_bsh), "%s/%s", scripts_src, entries[i].name);
-                    snprintf(dest_bsh, sizeof(dest_bsh), "%s/%s", target_pkglib, entries[i].name);
-                    copy_file(src_bsh, dest_bsh);
+        FAT32_FileInfo *entries = malloc(sizeof(FAT32_FileInfo) * 128);
+        if (entries) {
+            int s_count = sys_list(scripts_src, entries, 128);
+            for (int i = 0; i < s_count; i++) {
+                if (!entries[i].is_directory) {
+                    if (strncmp(entries[i].name, "._", 2) == 0) continue;
+                    size_t nlen = strlen(entries[i].name);
+                    if (nlen > 4 && strcmp(entries[i].name + nlen - 4, ".bsh") == 0) {
+                        char src_bsh[1024], dest_bsh[1024];
+                        snprintf(src_bsh, sizeof(src_bsh), "%s/%s", scripts_src, entries[i].name);
+                        snprintf(dest_bsh, sizeof(dest_bsh), "%s/%s", target_pkglib, entries[i].name);
+                        copy_file(src_bsh, dest_bsh);
+                    }
                 }
             }
+            free(entries);
         }
         
         // Check which scripts exist
@@ -768,8 +785,15 @@ int cmd_upgrade(const char *pkgname) {
     if (!f) { printf("No packages installed\n"); return 0; }
 
     char line[1024];
-    char pkgs[128][256];
-    char vers[128][128];
+    char (*pkgs)[256] = malloc(128 * 256);
+    char (*vers)[128] = malloc(128 * 128);
+    if (!pkgs || !vers) {
+        if (pkgs) free(pkgs);
+        if (vers) free(vers);
+        fclose(f);
+        printf("Out of memory\n");
+        return -1;
+    }
     int count = 0;
 
     char cur_pkg[256] = {0};
@@ -832,6 +856,8 @@ int cmd_upgrade(const char *pkgname) {
         }
     }
 
+    free(pkgs);
+    free(vers);
     if (upgraded == 0) printf("All packages up to date\n");
     return 0;
 }
@@ -966,7 +992,8 @@ int cmd_clean(void) {
     printf("Cleaning package cache...\n");
     char path[1024];
     snprintf(path, sizeof(path), "%s/packages", CACHE_DIR);
-    FAT32_FileInfo entries[128];
+    FAT32_FileInfo *entries = malloc(sizeof(FAT32_FileInfo) * 128);
+    if (!entries) return -1;
     int got = sys_list(path, entries, 128);
     for (int i = 0; i < got; i++) {
         if (!entries[i].is_directory) {
@@ -978,6 +1005,7 @@ int cmd_clean(void) {
             }
         }
     }
+    free(entries);
     printf("Cache cleaned\n");
     return 0;
 }
