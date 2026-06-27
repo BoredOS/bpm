@@ -8,10 +8,10 @@
 #include "sha256.h"
 
 #define CACHE_DIR       "/var/cache/bpm"
-#define LIB_DIR         "/var/lib/bpm"
-#define PACKAGES_DIR    "/var/lib/bpm/packages"
-#define INSTALLED_TOML  "/var/lib/bpm/installed.toml"
-#define CONFIG_PATH     "/etc/bpm/bpmconf.toml"
+#define LIB_DIR         "/Library/Receipts"
+#define PACKAGES_DIR    "/Library/Receipts"
+#define INSTALLED_TOML  "/Library/Receipts/bpm_installed.toml"
+#define CONFIG_PATH     "/Library/AppData/org.boredos.bpm/bpmconf.toml"
 
 static const char *g_root = NULL;
 
@@ -419,28 +419,29 @@ static void copy_dir(const char *srcdir, const char *destdir, int skip_existing)
     ensure_dir(destdir);
     FAT32_FileInfo *entries = malloc(sizeof(FAT32_FileInfo) * 128);
     if (!entries) return;
-    int count = sys_list(srcdir, entries, 128);
-    if (count < 0) {
-        free(entries);
-        return;
-    }
-    for (int i = 0; i < count; i++) {
-        if (strncmp(entries[i].name, "._", 2) == 0) continue;
-        
-        char srcpath[1024];
-        char destpath[1024];
-        snprintf(srcpath, sizeof(srcpath), "%s/%s", srcdir, entries[i].name);
-        snprintf(destpath, sizeof(destpath), "%s/%s", destdir, entries[i].name);
-        
-        if (entries[i].is_directory) {
-            copy_dir(srcpath, destpath, skip_existing);
-        } else {
-            if (skip_existing) {
-                struct stat st;
-                if (stat(destpath, &st) == 0) continue;
+    int offset = 0;
+    while (1) {
+        int count = sys_list_offset(srcdir, entries, 128, offset);
+        if (count <= 0) break;
+        for (int i = 0; i < count; i++) {
+            if (strncmp(entries[i].name, "._", 2) == 0) continue;
+            
+            char srcpath[1024];
+            char destpath[1024];
+            snprintf(srcpath, sizeof(srcpath), "%s/%s", srcdir, entries[i].name);
+            snprintf(destpath, sizeof(destpath), "%s/%s", destdir, entries[i].name);
+            
+            if (entries[i].is_directory) {
+                copy_dir(srcpath, destpath, skip_existing);
+            } else {
+                if (skip_existing) {
+                    struct stat st;
+                    if (stat(destpath, &st) == 0) continue;
+                }
+                copy_file(srcpath, destpath);
             }
-            copy_file(srcpath, destpath);
         }
+        offset += count;
     }
     free(entries);
 }
@@ -587,7 +588,9 @@ int cmd_install(const char *pkgname, int keep_configs) {
     char config_src[1024];
     snprintf(config_src, sizeof(config_src), "%s/config", extract_dir);
     if (stat(config_src, &st) == 0) {
-        const char *dest = m.install_config[0] ? m.install_config : "/Library/conf";
+        char default_dest[1024];
+        snprintf(default_dest, sizeof(default_dest), "/Library/AppData/%s", m.name);
+        const char *dest = m.install_config[0] ? m.install_config : default_dest;
         char dest_buf[1024];
         const char *target_dest = get_target_path(dest, dest_buf, sizeof(dest_buf));
         ensure_dir(target_dest);
@@ -599,7 +602,8 @@ int cmd_install(const char *pkgname, int keep_configs) {
     char apps_src[1024];
     snprintf(apps_src, sizeof(apps_src), "%s/usr/share/applications", extract_dir);
     if (stat(apps_src, &st) == 0) {
-        const char *dest_apps = "/usr/share/applications";
+        char dest_apps[1024];
+        snprintf(dest_apps, sizeof(dest_apps), "/Library/AppData/%s", m.name);
         char apps_buf[1024];
         const char *target_apps = get_target_path(dest_apps, apps_buf, sizeof(apps_buf));
         ensure_dir(target_apps);
@@ -692,7 +696,9 @@ int cmd_remove(const char *pkgname, int keep_configs) {
     char manifest_path[1024];
     snprintf(manifest_path, sizeof(manifest_path), "%s/%s/MANIFEST.toml", PACKAGES_DIR, pkgname);
     int has_manifest = (parse_manifest(manifest_path, &m) == 0);
-    const char *config_dir = (has_manifest && m.install_config[0]) ? m.install_config : "/Library/conf";
+    char default_config_path[1024];
+    snprintf(default_config_path, sizeof(default_config_path), "/Library/AppData/%s", pkgname);
+    const char *config_dir = (has_manifest && m.install_config[0]) ? m.install_config : default_config_path;
 
     // Run remove.bsh first if it exists
     char script[1024];

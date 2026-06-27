@@ -62,10 +62,8 @@ obj/%.o: src/%.c
 install: all
 	mkdir -p $(DESTDIR)/bin
 	cp $(APPS) $(DESTDIR)/bin/
-	mkdir -p $(DESTDIR)/Library/conf
-	cp assets/* $(DESTDIR)/Library/conf/ 2>/dev/null || true
-	mkdir -p $(DESTDIR)/etc/bpm
-	cp bpmconf.toml $(DESTDIR)/etc/bpm/bpmconf.toml 2>/dev/null || true
+	mkdir -p $(DESTDIR)/Library/AppData/org.boredos.bpm
+	cp bpmconf.toml $(DESTDIR)/Library/AppData/org.boredos.bpm/bpmconf.toml 2>/dev/null || true
 
 clean:
 	rm -rf obj build $(APPS)
