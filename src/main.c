@@ -4,6 +4,8 @@
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <unistd.h>
+#include <sys/wait.h>
 #include <syscall.h>
 #include "sha256.h"
 
