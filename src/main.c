@@ -77,20 +77,25 @@ static int verify_sha256(const char *path, const char *expected) {
 
 
 static int copy_file(const char *src, const char *dest) {
-    FILE *fs = fopen(src, "rb");
-    if (!fs) return -1;
-    FILE *fd = fopen(dest, "wb");
-    if (!fd) {
-        fclose(fs);
-        return -1;
+    int sfd = sys_open(src, "r");
+    if (sfd < 0) return -1;
+    sys_delete(dest);
+    int dfd = sys_open(dest, "w");
+    if (dfd < 0) { sys_close(sfd); return -1; }
+
+    char *buf = (char*)malloc(524288);
+    if (!buf) { sys_close(sfd); sys_close(dfd); return -1; }
+    int n;
+    while ((n = sys_read(sfd, buf, 524288)) > 0) {
+        if (sys_write_fs(dfd, buf, n) != (uint32_t)n) {
+            sys_close(sfd); sys_close(dfd);
+            free(buf);
+            return -1;
+        }
     }
-    char buf[4096];
-    size_t n;
-    while ((n = fread(buf, 1, sizeof(buf), fs)) > 0) {
-        fwrite(buf, 1, n, fd);
-    }
-    fclose(fs);
-    fclose(fd);
+    free(buf);
+    sys_close(sfd);
+    sys_close(dfd);
     return 0;
 }
 
@@ -120,16 +125,11 @@ static void iso_timestamp(char *buf, size_t len) {
 
 static int _bpm_wait_pid(int pid) {
     int status = 0;
-    for (;;) {
-        int rc = sys_waitpid(pid, &status, 1);
-        if (rc == pid) {
-            return status;
-        }
-        if (rc < 0 && rc != -2) {
-            return -1;
-        }
-        sleep(10);
+    int rc = sys_waitpid(pid, &status, 0);
+    if (rc == pid) {
+        return status;
     }
+    return -1;
 }
 
 static int bpm_system(const char *command) {
