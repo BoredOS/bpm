@@ -87,10 +87,15 @@ static int copy_file(const char *src, const char *dest) {
     if (!buf) { sys_close(sfd); sys_close(dfd); return -1; }
     int n;
     while ((n = sys_read(sfd, buf, 524288)) > 0) {
-        if (sys_write_fs(dfd, buf, n) != (uint32_t)n) {
-            sys_close(sfd); sys_close(dfd);
-            free(buf);
-            return -1;
+        int written = 0;
+        while (written < n) {
+            int w = sys_write_fs(dfd, buf + written, (uint32_t)(n - written));
+            if (w <= 0) {
+                sys_close(sfd); sys_close(dfd);
+                free(buf);
+                return -1;
+            }
+            written += w;
         }
     }
     free(buf);
@@ -535,7 +540,7 @@ int cmd_install(const char *pkgname, int keep_configs) {
     fflush(stdout);
     char cmd[2048];
     snprintf(cmd, sizeof(cmd),
-        "tar.elf -q --lz4 -xf %s -C %s", bup_path, extract_dir);
+        "/bin/tar.elf -q --lz4 -xf %s -C %s", bup_path, extract_dir);
     if (bpm_system(cmd) != 0) {
         fprintf(stderr, "Extraction failed\n");
         return 4;
@@ -678,7 +683,7 @@ int cmd_install(const char *pkgname, int keep_configs) {
     // Cleanup
     remove_dir_recursive(extract_dir);
 
-    printf("Installed %s %s\n", pkgname, pkg.version);
+    printf("Installed %s %s\n", final_name, final_ver);
     free(files);
     return 0;
 }
