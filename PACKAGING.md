@@ -17,7 +17,7 @@ To build a `.bup` file, you must first organize your files inside a package root
 ```text
 pkg_staging/
 ├── MANIFEST.toml         # [Mandatory] Package metadata and install paths
-├── bin/                  # [Optional] Executable binaries (e.g. .elf files)
+├── bin/                  # [Optional] Executable binaries (e.g. compiled tools, scripts)
 ├── config/               # [Optional] Configuration files
 ├── assets/               # [Optional] Shared assets (images, themes, data, etc.)
 └── scripts/              # [Optional] Hook scripts executed during install/remove

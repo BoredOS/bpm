@@ -1,4 +1,6 @@
-// bpm - BoredOS Package Manager
+// Copyright (c) 2023-2026 Christiaan (chris@boreddev.nl)
+// This software is released under the GNU General Public License v3.0. See LICENSE file for details.
+// This header needs to maintain in any file it is present in, as per the GPL license terms.
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -102,6 +104,27 @@ static int copy_file(const char *src, const char *dest) {
     sys_close(sfd);
     sys_close(dfd);
     return 0;
+}
+
+static const char *get_bpm_config_path(char *buf, size_t buf_len) {
+    const char *home = getenv("HOME");
+    if (home && strcmp(home, "/") != 0) {
+        char user_conf[1024];
+        snprintf(user_conf, sizeof(user_conf), "%s/Library/AppData/org.boredos.bpm/bpmconf.toml", home);
+        if (access(user_conf, F_OK) != 0) {
+            char user_dir[1024];
+            snprintf(user_dir, sizeof(user_dir), "%s/Library/AppData/org.boredos.bpm", home);
+            ensure_dir(user_dir);
+            if (access(CONFIG_PATH, F_OK) == 0) {
+                copy_file(CONFIG_PATH, user_conf);
+            }
+        }
+        if (access(user_conf, F_OK) == 0) {
+            snprintf(buf, buf_len, "%s", user_conf);
+            return buf;
+        }
+    }
+    return get_target_path(CONFIG_PATH, buf, buf_len);
 }
 
 static void remove_dir_recursive(const char *path) {
@@ -263,8 +286,9 @@ typedef struct {
 } PkgInfo;
 
 static int find_package(const char *pkgname, PkgInfo *out) {
+    char cfg_path[1024];
     Config cfg;
-    if (load_config(CONFIG_PATH, &cfg) != 0) return 1;
+    if (load_config(get_bpm_config_path(cfg_path, sizeof(cfg_path)), &cfg) != 0) return 1;
 
     for (int i = 0; i < cfg.count; i++) {
         Repo *r = &cfg.repos[i];
@@ -457,8 +481,9 @@ static void copy_dir(const char *srcdir, const char *destdir, int skip_existing)
 // ─── Commands ────────────────────────────────────────────────────────────────
 
 int cmd_update(void) {
+    char cfg_path[1024];
     Config cfg;
-    if (load_config(CONFIG_PATH, &cfg) != 0) return 1;
+    if (load_config(get_bpm_config_path(cfg_path, sizeof(cfg_path)), &cfg) != 0) return 1;
     ensure_dir(CACHE_DIR);
 
     int fetched = 0;
@@ -474,7 +499,7 @@ int cmd_update(void) {
         fflush(stdout);
         char cmd[2048];
         snprintf(cmd, sizeof(cmd),
-            "curl.elf -fsSL -o %s %s", outpath, r->url);
+            "curl -fsSL -o %s %s", outpath, r->url);
         if (bpm_system(cmd) == 0) { printf("done\n"); fetched++; }
         else printf("FAILED\n");
     }
@@ -540,7 +565,7 @@ int cmd_install(const char *pkgname, int keep_configs) {
     fflush(stdout);
     char cmd[2048];
     snprintf(cmd, sizeof(cmd),
-        "/bin/tar.elf -q --lz4 -xf %s -C %s", bup_path, extract_dir);
+        "/bin/tar -q --lz4 -xf %s -C %s", bup_path, extract_dir);
     if (bpm_system(cmd) != 0) {
         fprintf(stderr, "Extraction failed\n");
         return 4;
@@ -910,8 +935,9 @@ int cmd_list(void) {
 }
 
 int cmd_search(const char *query) {
+    char cfg_path[1024];
     Config cfg;
-    if (load_config(CONFIG_PATH, &cfg) != 0) {
+    if (load_config(get_bpm_config_path(cfg_path, sizeof(cfg_path)), &cfg) != 0) {
         fprintf(stderr, "No config found.\n");
         return 1;
     }
@@ -1060,8 +1086,10 @@ int cmd_addrepo(const char *input) {
         }
     }
 
-    FILE *f = fopen(CONFIG_PATH, "a");
-    if (!f) { fprintf(stderr, "Cannot open %s\n", CONFIG_PATH); return 1; }
+    char cfg_path[1024];
+    const char *target_cfg = get_bpm_config_path(cfg_path, sizeof(cfg_path));
+    FILE *f = fopen(target_cfg, "a");
+    if (!f) { fprintf(stderr, "Cannot open %s\n", target_cfg); return 1; }
     fprintf(f, "\n[[repositories]]\n");
     fprintf(f, "name = \"%s\"\n", name);
     fprintf(f, "url = \"%s\"\n", url);
@@ -1100,9 +1128,13 @@ int cmd_removerepo(const char *name) {
         sys_delete(path);
     }
 
-    FILE *fin = fopen(CONFIG_PATH, "r");
+    char cfg_path[1024];
+    const char *target_cfg = get_bpm_config_path(cfg_path, sizeof(cfg_path));
+    FILE *fin = fopen(target_cfg, "r");
     if (fin) {
-        FILE *fout = fopen(CONFIG_PATH ".tmp", "w");
+        char tmp_path[1024];
+        snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", target_cfg);
+        FILE *fout = fopen(tmp_path, "w");
         if (fout) {
             char rline[1024];
             int in_repo = 0;
@@ -1154,9 +1186,9 @@ int cmd_removerepo(const char *name) {
             fclose(fout);
         }
         fclose(fin);
-        sys_delete(CONFIG_PATH);
-        copy_file(CONFIG_PATH ".tmp", CONFIG_PATH);
-        sys_delete(CONFIG_PATH ".tmp");
+        sys_delete(target_cfg);
+        copy_file(tmp_path, target_cfg);
+        sys_delete(tmp_path);
     }
     printf("Removed repository '%s'\n", name);
     return 0;

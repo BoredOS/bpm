@@ -1,2 +1,7 @@
+obj/
+build/
 *.o
 *.elf
+*.a
+.DS_Store
+bpm
